@@ -41,10 +41,6 @@ The driver lives in `libfprint/drivers/goodixtls/goodix55x4.c`.
   `SECLEVEL=0` in the goodix TLS server.
 - **Tuned matching** for this sensor: `nr_enroll_stages` and `bz3_threshold`
   (both near the top of `goodix55x4.c`).
-- **Warm TLS across verify retries**: `pam_fprintd` deactivates and re-verifies
-  on every missed scan; the driver keeps the device + TLS session warm between
-  retries (only the first scan per claim pays the handshake), so repeated
-  attempts are near-instant instead of a ~3s cooldown each.
 
 ## Build & install
 
