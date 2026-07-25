@@ -1,4 +1,17 @@
-
+> ### Personal fork, not upstream libfprint
+>
+> This is my own fork of [TheWeirdDev/libfprint](https://github.com/TheWeirdDev/libfprint),
+> which is itself a fork of [libfprint](https://gitlab.freedesktop.org/libfprint/libfprint)
+> carrying driver work for Goodix readers. My changes get the Goodix `27c6:55b4` reader
+> working on Linux (Void, in my case), including tighter match gating after a false accept
+> and keeping the TLS session warm.
+>
+> The patches live on the `goodix-55b4-fixes` branch, which is the default branch here.
+> This is far behind freedesktop libfprint and is not packaged, supported, or submitted
+> upstream. If you want libfprint itself, go to
+> [gitlab.freedesktop.org/libfprint/libfprint](https://gitlab.freedesktop.org/libfprint/libfprint).
+>
+> Upstream's README follows.
 
 <div align="center">
 
