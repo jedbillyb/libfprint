@@ -885,11 +885,11 @@ fpi_device_goodixtls55x4_class_init(FpiDeviceGoodixTls55X4Class *class) {
   dev_class->full_name = "Goodix TLS Fingerprint Sensor 55X4";
   dev_class->type = FP_DEVICE_TYPE_USB;
   dev_class->id_table = id_table;
-  dev_class->nr_enroll_stages = 10;
+  dev_class->nr_enroll_stages = 24;
   dev_class->scan_type = FP_SCAN_TYPE_PRESS;
 
   // TODO
-  img_dev_class->bz3_threshold = 24 * 5;
+  img_dev_class->bz3_threshold = 16;
   img_dev_class->algorithm = FPI_DEVICE_ALGO_SIGFM;
   img_dev_class->img_width = GOODIX55X4_WIDTH;
   img_dev_class->img_height = GOODIX55X4_HEIGHT;
