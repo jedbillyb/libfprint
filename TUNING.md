@@ -46,9 +46,9 @@ that is why raising or lowering `bz3_threshold` alone often changes nothing.
 
 | Knob | File | Current | Direction |
 |---|---|---|---|
-| `min_match` | `libfprint/sigfm/sigfm.cpp` | 6 | lower = more forgiving |
-| `distance_match` | `libfprint/sigfm/sigfm.cpp` | 0.82 | higher = more forgiving |
-| `bz3_threshold` | `libfprint/drivers/goodixtls/goodix55x4.c` | 10 | lower = more forgiving |
+| `min_match` | `libfprint/sigfm/sigfm.cpp` | 12 | lower = more forgiving |
+| `distance_match` | `libfprint/sigfm/sigfm.cpp` | 0.74 | higher = more forgiving |
+| `bz3_threshold` | `libfprint/drivers/goodixtls/goodix55x4.c` | 48 | lower = more forgiving |
 | `nr_enroll_stages` | `libfprint/drivers/goodixtls/goodix55x4.c` | 24 | higher = more coverage |
 
 `min_match` is usually the binding constraint on a marginal press, not
@@ -104,11 +104,25 @@ Use `builddir2`; the old `builddir` is configured against a dead source path.
 Commit the constants — an uncommitted tuning edit is lost on the next checkout,
 which has happened before.
 
-## Security note
+## Security note — a false accept actually happened here
 
-These values are well below upstream defaults (`min_match` was 15,
-`distance_match` 0.70). Every step toward leniency raises the false-accept
-rate: more of someone else's finger will pass. That is a reasonable trade for
-a personal laptop where the fingerprint is a convenience and the password
-always works as fallback — but it is a real trade, not a free win. If anything
-ever unlocks that should not have, raise `min_match` first.
+Loosening these is not free, and the failure mode is not theoretical. At
+**`min_match = 6`, `distance_match = 0.82`, `bz3_threshold = 10`** an
+*unenrolled* finger unlocked the machine. Do not go back to those values.
+
+Known points on the curve, both observed on this hardware:
+
+| Setting | Result |
+|---|---|
+| 15 / 0.70 / 120 | upstream-ish; rejected too many genuine presses |
+| 12 / 0.74 / 48 | current compromise |
+| 6 / 0.82 / 10 | **accepted the wrong finger — unsafe** |
+
+The right value is found by measuring, not guessing: capture scores for the
+enrolled finger and for an unenrolled one (see "Measure before guessing"), and
+set `bz3_threshold` in the gap between the two distributions. If they overlap,
+no threshold is safe and the fix is a better enrollment — more captures with
+varied angle, edge and pressure — not a lower bar.
+
+Treat the fingerprint as convenience. The password fallback is the real
+security boundary; keep it strong.

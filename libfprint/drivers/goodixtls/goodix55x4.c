@@ -63,6 +63,19 @@ struct _FpiDeviceGoodixTls55X4 {
   GSList *frames;
 
   Goodix55X4Pix empty_img[GOODIX55X4_FRAME_SIZE];
+  // The background frame barely changes within an activation, so capture it
+  // once and reuse it rather than re-reading a full frame before every scan.
+  gboolean empty_img_valid;
+  // TRUE once the device is fully activated (chip enabled, MCU configured, TLS
+  // session up) and being kept warm. While warm, deactivate completes
+  // immediately and the next activate skips the whole activate sequence plus
+  // the TLS handshake -- that down-up cycle was ~3s on every pam_fprintd retry.
+  //
+  // Cleared on device open/close and, crucially, whenever a scan fails. A warm
+  // session goes stale when the sensor re-enumerates after idle, and without
+  // that reset every later scan takes the warm path and fails instantly,
+  // forever. Clearing it on failure costs one cold re-activate and self-heals.
+  gboolean active;
 };
 
 G_DECLARE_FINAL_TYPE(FpiDeviceGoodixTls55X4, fpi_device_goodixtls55x4, FPI,
@@ -347,6 +360,10 @@ static void tls_activation_complete(FpDevice *dev, gpointer user_data,
     return;
   }
   FpImageDevice *image_dev = FP_IMAGE_DEVICE(dev);
+
+  // TLS session is up: mark the device warm so retries within this claim skip
+  // the handshake until it is closed or a scan fails.
+  FPI_DEVICE_GOODIXTLS55X4(dev)->active = TRUE;
 
   fpi_image_device_activate_complete(image_dev, error);
 }
@@ -650,6 +667,7 @@ static void on_scan_empty_img(FpDevice *dev, guint8 *data, guint16 length,
   }
   FpiDeviceGoodixTls55X4 *self = FPI_DEVICE_GOODIXTLS55X4(dev);
   decode_frame(self->empty_img, data);
+  self->empty_img_valid = TRUE;
   // FpImage *bgk = fp_image_new(GOODIX55X4_WIDTH, GOODIX55X4_HEIGHT);
   // squash_frame(self->empty_img, bgk->data);
   // save_image_to_pgm(bgk, "./background.pgm");
@@ -698,7 +716,12 @@ static void scan_run_state(FpiSsm *ssm, FpDevice *dev) {
 
   switch (fpi_ssm_get_cur_state(ssm)) {
   case SCAN_STAGE_CALIBRATE:
-    scan_empty_img(dev, ssm);
+    if (FPI_DEVICE_GOODIXTLS55X4(dev)->empty_img_valid) {
+      // Reuse the cached background frame instead of the slow recapture.
+      fpi_ssm_next_state(ssm);
+    } else {
+      scan_empty_img(dev, ssm);
+    }
     break;
   case SCAN_STAGE_SWITCH_TO_FDT_MODE:
     g_print("SWITCH TO FDT MODE\n");
@@ -786,6 +809,14 @@ static void write_sensor_complete(FpDevice *dev, gpointer user_data,
 static void scan_complete(FpiSsm *ssm, FpDevice *dev, GError *error) {
   if (error) {
     fp_err("failed to scan: %s (code: %d)", error->message, error->code);
+    // The warm session is the prime suspect for a scan failure: the sensor
+    // re-enumerates onto a new USB address after idle and leaves this one bound
+    // to a dead fd. Drop the warm state so the next activate goes cold and
+    // re-handshakes. Without this the driver loops instant failures forever,
+    // which is exactly why the original warm-session change was reverted.
+    FpiDeviceGoodixTls55X4 *self = FPI_DEVICE_GOODIXTLS55X4(dev);
+    self->active = FALSE;
+    self->empty_img_valid = FALSE;
     return;
   }
   g_print("finished scan!");
@@ -806,7 +837,10 @@ static void scan_start(FpiDeviceGoodixTls55X4 *dev) {
                 scan_complete);
 }
 
-static void sleep_start(FpDevice *dev, gpointer user_data) {
+// Retained deliberately: dev_deactivate no longer sleeps the MCU (it keeps the
+// device warm instead), but this is the teardown to restore if that is ever
+// reverted. The real teardown now happens on close, in dev_deinit.
+G_GNUC_UNUSED static void sleep_start(FpDevice *dev, gpointer user_data) {
   fpi_ssm_start(fpi_ssm_new(dev, sleep_run_state, SLEEP_STAGE_NUM),
                 sleep_complete);
 }
@@ -818,6 +852,10 @@ static void sleep_start(FpDevice *dev, gpointer user_data) {
 static void dev_init(FpImageDevice *img_dev) {
   FpDevice *dev = FP_DEVICE(img_dev);
   GError *error = NULL;
+
+  // Freshly opened device: not warm, so force a cold activate + handshake.
+  FPI_DEVICE_GOODIXTLS55X4(dev)->active = FALSE;
+  FPI_DEVICE_GOODIXTLS55X4(dev)->empty_img_valid = FALSE;
 
   if (goodix_dev_init(dev, &error)) {
     fpi_image_device_open_complete(img_dev, error);
@@ -831,6 +869,11 @@ static void dev_deinit(FpImageDevice *img_dev) {
   FpDevice *dev = FP_DEVICE(img_dev);
   GError *error = NULL;
 
+  // Closing tears down the TLS session (goodix_shutdown_tls), so the next open
+  // must re-handshake.
+  FPI_DEVICE_GOODIXTLS55X4(dev)->active = FALSE;
+  FPI_DEVICE_GOODIXTLS55X4(dev)->empty_img_valid = FALSE;
+
   if (goodix_dev_deinit(dev, &error)) {
     fpi_image_device_close_complete(img_dev, error);
     return;
@@ -841,6 +884,20 @@ static void dev_deinit(FpImageDevice *img_dev) {
 
 static void dev_activate(FpImageDevice *img_dev) {
   FpDevice *dev = FP_DEVICE(img_dev);
+  FpiDeviceGoodixTls55X4 *self = FPI_DEVICE_GOODIXTLS55X4(dev);
+
+  if (self->active) {
+    // Warm path: device still enabled and configured, TLS session live from
+    // the previous verify. Skipping the activate sequence and the handshake is
+    // the whole point -- this is the ~3s per retry. A stale session is caught
+    // by scan_complete, which clears the flag so the next activate is cold.
+    fp_dbg("device still warm, skipping activate + TLS handshake");
+    fpi_image_device_activate_complete(img_dev, NULL);
+    return;
+  }
+
+  // Cold path: recapture the background on the first scan of this activation.
+  self->empty_img_valid = FALSE;
 
   fpi_ssm_start(fpi_ssm_new(dev, activate_run_state, ACTIVATE_NUM_STATES),
                 activate_complete);
@@ -861,8 +918,12 @@ static void dev_change_state(FpImageDevice *img_dev,
 
 
 static void dev_deactivate(FpImageDevice *img_dev) {
-  FpDevice *dev = FP_DEVICE(img_dev);
-  fpi_device_add_timeout(dev, 250, sleep_start, NULL, NULL);
+  // Stay warm rather than sleeping the MCU and tearing down TLS. pam_fprintd
+  // deactivates between every verify retry, and doing the full sleep here (then
+  // redoing it all in activate) was the per-attempt cooldown. The real teardown
+  // happens on close, in dev_deinit. Complete at once so the next verify can
+  // start immediately.
+  fpi_image_device_deactivate_complete(img_dev, NULL);
 }
 
 // ---- DEV SECTION END ----
@@ -889,7 +950,7 @@ fpi_device_goodixtls55x4_class_init(FpiDeviceGoodixTls55X4Class *class) {
   dev_class->scan_type = FP_SCAN_TYPE_PRESS;
 
   // TODO
-  img_dev_class->bz3_threshold = 10;
+  img_dev_class->bz3_threshold = 48;
   img_dev_class->algorithm = FPI_DEVICE_ALGO_SIGFM;
   img_dev_class->img_width = GOODIX55X4_WIDTH;
   img_dev_class->img_height = GOODIX55X4_HEIGHT;
